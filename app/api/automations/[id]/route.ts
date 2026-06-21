@@ -4,12 +4,11 @@ import Automation from '@/models/Automation'
 import clientPromise from '@/lib/mongodb'
 import { ObjectId } from 'mongodb'
 
-await clientPromise
-
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -42,6 +41,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -77,6 +77,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {

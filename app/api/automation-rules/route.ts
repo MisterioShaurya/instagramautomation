@@ -3,10 +3,8 @@ import { getServerSession } from '@/lib/session-server'
 import AutomationRule from '@/models/AutomationRule'
 import clientPromise from '@/lib/mongodb'
 
-// Initialize mongoose connection
-await clientPromise
-
 export async function GET(request: NextRequest) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -37,6 +35,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {

@@ -4,9 +4,8 @@ import Automation from '@/models/Automation'
 import ActivityLog from '@/models/ActivityLog'
 import clientPromise from '@/lib/mongodb'
 
-await clientPromise
-
 export async function GET(request: NextRequest) {
+  await clientPromise
   try {
     const session = await getServerSession()
     if (!session?.userId) {
