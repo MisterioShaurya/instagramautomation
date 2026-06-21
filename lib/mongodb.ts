@@ -1,40 +1,67 @@
 import mongoose from 'mongoose'
 
+// Disable mongoose buffering globally — fail fast instead of timing out
+mongoose.set('bufferCommands', false)
+
 /**
  * Connect to MongoDB.
  * Lazily connects — safe to import during build/static generation.
- * The actual connection only happens when `connectDB()` is first awaited.
+ * Retries on failure so transient connection issues don't permanently break.
  */
 let cached: Promise<typeof mongoose> | null = null
+let lastError: Error | null = null
 
 export async function connectDB(): Promise<typeof mongoose> {
-  if (cached) return cached
+  // If we have a cached promise (pending or resolved), use it
+  if (cached) {
+    return cached
+  }
+
+  // If we previously failed, clear the error so we retry
+  lastError = null
 
   const MONGODB_URI = process.env.MONGODB_URI
 
   if (!MONGODB_URI) {
-    throw new Error('Please define the MONGODB_URI environment variable')
+    lastError = new Error('Please define the MONGODB_URI environment variable')
+    throw lastError
   }
 
   if (!MONGODB_URI.startsWith('mongodb://') && !MONGODB_URI.startsWith('mongodb+srv://')) {
-    throw new Error(
+    lastError = new Error(
       `Invalid MongoDB URI scheme. Expected "mongodb://" or "mongodb+srv://".`
     )
+    throw lastError
   }
 
+  // If already connected, return immediately
+  if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) {
+    cached = Promise.resolve(mongoose)
+    return cached
+  }
+
+  // Initiate connection
   cached = mongoose.connect(MONGODB_URI, {
     bufferCommands: false,
+    serverSelectionTimeoutMS: 5000, // Fail fast if server is unreachable
+    connectTimeoutMS: 5000,
+  })
+
+  // If connection fails, clear cache so next call retries
+  cached.catch((err) => {
+    lastError = err
+    cached = null
   })
 
   return cached
 }
 
-// Keep a default export that's a plain promise that errors if awaited before connectDB
+// Thenable default export for backward compatibility with `await clientPromise`
 const clientPromise = {
   then(onfulfilled?: any, onrejected?: any) {
     return connectDB()
       .then((m) => m.connection.getClient())
-      .then(onfulfilled)
+      .then((c) => (onfulfilled ? onfulfilled(c) : c))
       .catch(onrejected)
   },
   catch(onrejected?: any) {
