@@ -382,3 +382,5 @@ NEXTAUTH_SECRET=your_generated_secret
 ---
 
 Built with Next.js 16, MongoDB, and NextAuth.js
+#   i n s t a g r a m a u t o m a t i o n  
+ 
