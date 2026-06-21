@@ -6,8 +6,9 @@ import { ObjectId } from 'mongodb'
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params
   await clientPromise
   try {
     const session = await getServerSession()
@@ -18,7 +19,7 @@ export async function PUT(
     const body = await request.json()
 
     const rule = await AutomationRule.findOneAndUpdate(
-      { _id: new ObjectId(params.id), userId: session.userId },
+      { _id: new ObjectId(id), userId: session.userId },
       body,
       { new: true }
     )
@@ -42,8 +43,9 @@ export async function PUT(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params
   await clientPromise
   try {
     const session = await getServerSession()
@@ -52,7 +54,7 @@ export async function DELETE(
     }
 
     const rule = await AutomationRule.findOneAndDelete({
-      _id: new ObjectId(params.id),
+      _id: new ObjectId(id),
       userId: session.userId,
     })
 
