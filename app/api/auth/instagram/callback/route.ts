@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import User from '@/models/User'
 import { encryptToken } from '@/lib/encryption'
 import { signToken } from '@/lib/jwt'
@@ -111,6 +111,9 @@ export async function GET(request: NextRequest) {
       loginUrl.searchParams.set('error', 'no_code')
       return NextResponse.redirect(loginUrl)
     }
+
+    // Ensure database connection before any model operations
+    await connectDB()
 
     // Step 1: Exchange code for short-lived token
     console.log('[instagram-oauth] Exchanging code for token...')

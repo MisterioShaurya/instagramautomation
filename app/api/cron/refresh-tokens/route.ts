@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import User from '@/models/User'
 import { encryptToken, decryptToken } from '@/lib/encryption'
 
@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
     console.log('[cron:refresh-tokens] Starting token refresh check...')
 
     // Ensure DB connection
-    await clientPromise
+    await connectDB()
 
     // Calculate the date 5 days from now
     const fiveDaysFromNow = new Date()

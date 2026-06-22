@@ -1,20 +1,38 @@
 import mongoose from 'mongoose'
 
-// Disable mongoose buffering globally — fail fast instead of timing out
-mongoose.set('bufferCommands', false)
-
 /**
  * Connect to MongoDB.
  * Lazily connects — safe to import during build/static generation.
  * Retries on failure so transient connection issues don't permanently break.
+ * 
+ * IMPORTANT: bufferCommands is NOT set globally. It's only set in the connection
+ * options. This allows Mongoose to buffer (queue) model operations if they're
+ * called before the connection is fully established, preventing the
+ * "Cannot call X before initial connection is complete" error.
  */
 let cached: Promise<typeof mongoose> | null = null
 let lastError: Error | null = null
+let connectionReady = false
 
 export async function connectDB(): Promise<typeof mongoose> {
-  // If we have a cached promise (pending or resolved), use it
+  // If already connected, return immediately
+  if (connectionReady && mongoose.connection.readyState === 1) {
+    return mongoose
+  }
+
+  // If we have a cached promise, wait for it
   if (cached) {
-    return cached
+    try {
+      const m = await cached
+      if (mongoose.connection.readyState === 1) {
+        connectionReady = true
+        return m
+      }
+    } catch {
+      // Cached promise rejected, clear it and retry
+      cached = null
+      connectionReady = false
+    }
   }
 
   // If we previously failed, clear the error so we retry
@@ -35,22 +53,30 @@ export async function connectDB(): Promise<typeof mongoose> {
   }
 
   // If already connected, return immediately
-  if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) {
+  if (mongoose.connection.readyState === 1) {
+    connectionReady = true
     cached = Promise.resolve(mongoose)
     return cached
   }
 
-  // Initiate connection
+  // Initiate connection — bufferCommands: true (default) so model operations
+  // are queued until connection is established
   cached = mongoose.connect(MONGODB_URI, {
-    bufferCommands: false,
-    serverSelectionTimeoutMS: 5000, // Fail fast if server is unreachable
-    connectTimeoutMS: 5000,
+    bufferCommands: true,
+    serverSelectionTimeoutMS: 10000, // 10s timeout for server selection
+    connectTimeoutMS: 10000,
+  }).then((m) => {
+    connectionReady = true
+    console.log('[mongodb] Connected successfully')
+    return m
   })
 
   // If connection fails, clear cache so next call retries
   cached.catch((err) => {
+    console.error('[mongodb] Connection failed:', err.message)
     lastError = err
     cached = null
+    connectionReady = false
   })
 
   return cached

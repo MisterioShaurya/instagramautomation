@@ -1,4 +1,4 @@
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import User from '@/models/User'
 import Automation from '@/models/Automation'
 import ActivityLog from '@/models/ActivityLog'
@@ -31,7 +31,7 @@ export async function processWebhookEvent(context: WebhookEventContext) {
     })
 
     // Connect to database
-    await clientPromise
+    await connectDB()
 
     // 1. Find all active automations for this user that match the event type
     const automations = await Automation.find({

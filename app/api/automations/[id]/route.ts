@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/session-server'
 import Automation from '@/models/Automation'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import { ObjectId } from 'mongodb'
 
 export async function GET(
@@ -9,7 +9,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  await clientPromise
+  await connectDB()
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -43,7 +43,7 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  await clientPromise
+  await connectDB()
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -80,7 +80,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  await clientPromise
+  await connectDB()
   try {
     const session = await getServerSession()
     if (!session?.userId) {

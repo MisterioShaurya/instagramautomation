@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/session-server'
-import clientPromise from '@/lib/mongodb'
 import User from '@/models/User'
 import { processWebhookEvent } from '@/lib/webhook-processor'
 

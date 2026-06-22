@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import AutomationRule from '@/models/AutomationRule'
 import User from '@/models/User'
 import SentReply from '@/models/SentReply'
@@ -131,7 +131,8 @@ interface CommentEvent {
 }
 
 async function processCommentEvent(eventData: CommentEvent) {
-  await clientPromise
+  // Ensure MongoDB connection is established before any model operations
+  await connectDB()
 
   const commentId = eventData.id
   const commentText = (eventData.text || '').trim()

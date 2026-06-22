@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 import User from '@/models/User'
 import Automation from '@/models/Automation'
 import AutomationRule from '@/models/AutomationRule'
@@ -38,7 +38,7 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(request: NextRequest) {
   try {
-    await clientPromise
+    await connectDB()
 
     let instagramUserId: string | null = null
 

@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/session-server'
 import Automation from '@/models/Automation'
-import clientPromise from '@/lib/mongodb'
+import { connectDB } from '@/lib/mongodb'
 
 export async function GET(request: NextRequest) {
-  await clientPromise
+  await connectDB()
   try {
     const session = await getServerSession()
     if (!session?.userId) {
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  await clientPromise
+  await connectDB()
   try {
     const session = await getServerSession()
     if (!session?.userId) {
