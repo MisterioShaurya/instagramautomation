@@ -1,6 +1,4 @@
 import { decryptToken } from '@/lib/encryption'
-import User from '@/models/User'
-import clientPromise from '@/lib/mongodb'
 
 /**
  * Instagram Graph API Integration
@@ -195,7 +193,9 @@ export async function sendInstagramPrivateReply(
     // Instagram DM limit is ~1000 chars
     const truncatedMessage = messageText.substring(0, 1000)
 
-    const url = `https://graph.instagram.com/v21.0/${commentId}/private_replies`
+    // Meta Graph API requires access_token as a query parameter, NOT in the JSON body
+    // Ref: https://developers.facebook.com/docs/instagram-api/reference/ig-comment/private_replies
+    const url = `https://graph.instagram.com/v21.0/${commentId}/private_replies?access_token=${encodeURIComponent(decryptedToken)}`
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -203,7 +203,6 @@ export async function sendInstagramPrivateReply(
       },
       body: JSON.stringify({
         message: truncatedMessage,
-        access_token: decryptedToken,
       }),
     })
 
@@ -212,6 +211,7 @@ export async function sendInstagramPrivateReply(
     if (!response.ok) {
       const errorCode = data.error?.code
       const errorMessage = data.error?.message || 'Unknown error'
+      const fullError = data.error ? JSON.stringify(data.error) : errorMessage
 
       if (response.status === 429) {
         console.warn('[instagram] Rate limited on private reply:', errorMessage)
@@ -219,15 +219,15 @@ export async function sendInstagramPrivateReply(
       }
 
       if (response.status === 401 || response.status === 403) {
-        console.error('[instagram] Auth failure on private reply:', errorMessage)
+        console.error('[instagram] Auth failure on private reply:', fullError)
         throw new InstagramDMError(response.status, errorCode, `Auth failed: ${errorMessage}`)
       }
 
-      console.error('[instagram] Private reply API error:', errorMessage)
+      console.error('[instagram] Private reply API error:', fullError)
       throw new InstagramDMError(response.status, errorCode, errorMessage)
     }
 
-    console.log('[instagram] Private reply sent successfully, response:', data)
+    console.log('[instagram] Private reply sent successfully, response:', JSON.stringify(data))
     return data
   } catch (error) {
     if (error instanceof InstagramDMError) {
