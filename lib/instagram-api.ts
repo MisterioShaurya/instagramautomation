@@ -1,8 +1,10 @@
-import { decryptToken } from '@/lib/encryption'
+import { decryptToken, encryptToken } from '@/lib/encryption'
 
 /**
- * Instagram Graph API Integration
- * Handles sending direct messages via the Meta Graph API
+ * Instagram Graph API Integration v19.0
+ * 
+ * IMPORTANT: All comment/DM/reply operations require a 
+ * FACEBOOK PAGE ACCESS TOKEN, not a user token.
  */
 
 export class InstagramDMError extends Error {
@@ -17,111 +19,252 @@ export class InstagramDMError extends Error {
 }
 
 /**
- * Send a DM to an Instagram user
+ * Get a Page Access Token from a User Access Token.
+ * The user token must have pages_manage_metadata or pages_read_engagement permission.
  * 
- * @param recipientId Instagram user ID to send DM to
- * @param messageText The message content
- * @param accessToken User's Instagram Page Access Token (encrypted in DB)
- * @returns The message ID if successful
+ * GET https://graph.facebook.com/v19.0/me/accounts?access_token={user_token}
+ * Returns the page access token for the first page with instagram business account.
  */
-export async function sendInstagramDM(
-  recipientId: string,
-  messageText: string,
-  accessToken: string
-): Promise<string> {
+export async function getPageAccessToken(userAccessToken: string): Promise<{ pageId: string; pageAccessToken: string; pageName: string } | null> {
   try {
-    console.log('[instagram] Sending DM to:', recipientId)
+    const decrypted = decryptToken(userAccessToken)
+    if (!decrypted) return null
 
-    if (!accessToken) {
-      throw new InstagramDMError(401, null, 'Instagram access token not found')
+    const url = `https://graph.facebook.com/v19.0/me/accounts?access_token=${encodeURIComponent(decrypted)}&fields=id,name,access_token,instagram_business_account{id,username}`
+    const resp = await fetch(url.toString())
+    const data = await resp.json()
+
+    if (!resp.ok) {
+      console.error('[ig-api] Failed to fetch pages:', data.error?.message)
+      return null
     }
 
-    // Decrypt the access token before use
-    const decryptedToken = decryptToken(accessToken)
+    const pages = data.data || []
+    const pageWithIg = pages.find((p: any) => p.instagram_business_account)
+    if (!pageWithIg) return null
 
-    if (!decryptedToken) {
-      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
+    return {
+      pageId: pageWithIg.id,
+      pageAccessToken: pageWithIg.access_token,
+      pageName: pageWithIg.name,
     }
-
-    // Ensure message is not too long (Instagram limit is ~1000 chars per DM)
-    const truncatedMessage = messageText.substring(0, 1000)
-
-    // Call Meta Graph API to send the message
-    // Endpoint: POST /ig_hashtag_search/me/messages
-    // We're sending via the Page API: POST /me/messages
-    const response = await fetch(
-      'https://graph.facebook.com/v19.0/me/messages',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          recipient: {
-            id: recipientId,
-          },
-          message: {
-            text: truncatedMessage,
-          },
-          access_token: decryptedToken,
-        }),
-      }
-    )
-
-    const data = await response.json()
-
-    // Handle API errors
-    if (!response.ok) {
-      const errorCode = data.error?.code
-      const errorMessage = data.error?.message || 'Unknown error'
-
-      // 429 = Rate limited
-      if (response.status === 429) {
-        console.warn('[instagram] Rate limited:', errorMessage)
-        throw new InstagramDMError(429, errorCode, `Rate limited: ${errorMessage}`)
-      }
-
-      // 401/403 = Auth failure (likely expired token)
-      if (response.status === 401 || response.status === 403) {
-        console.error('[instagram] Auth failure:', errorMessage)
-        throw new InstagramDMError(response.status, errorCode, `Auth failed: ${errorMessage}`)
-      }
-
-      // Other errors
-      console.error('[instagram] API error:', errorMessage)
-      throw new InstagramDMError(response.status, errorCode, errorMessage)
-    }
-
-    const messageId = data.message_id
-
-    if (!messageId) {
-      throw new InstagramDMError(500, null, 'No message ID in response')
-    }
-
-    console.log('[instagram] DM sent successfully, message ID:', messageId)
-    return messageId
-  } catch (error) {
-    if (error instanceof InstagramDMError) {
-      throw error
-    }
-
-    console.error('[instagram] Unexpected error:', error)
-    throw new InstagramDMError(
-      500,
-      null,
-      `Unexpected error: ${error instanceof Error ? error.message : String(error)}`
-    )
+  } catch (err) {
+    console.error('[ig-api] getPageAccessToken error:', err)
+    return null
   }
 }
 
 /**
- * Retry sending a DM with exponential backoff
- * Handles transient failures like rate limiting
+ * Fetch comments on a media (reel) from Instagram Graph API.
+ * Requires a PAGE access token with instagram_manage_comments permission.
  * 
- * @param recipientId Instagram user ID
- * @param messageText Message content
- * @param accessToken Encrypted access token
- * @param maxRetries Maximum number of retry attempts
+ * GET https://graph.facebook.com/v19.0/{media-id}/comments
+ *   ?fields=id,text,username,timestamp,from
+ *   &access_token={page_access_token}
+ */
+export async function fetchMediaComments(
+  mediaId: string,
+  pageAccessToken: string
+): Promise<any[]> {
+  const decryptedToken = decryptToken(pageAccessToken)
+  if (!decryptedToken) {
+    throw new InstagramDMError(401, null, 'Failed to decrypt page access token')
+  }
+
+  const url = `https://graph.facebook.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp,from&access_token=${encodeURIComponent(decryptedToken)}`
+  console.log('[ig-api] Fetching comments for media:', mediaId)
+
+  const response = await fetch(url.toString())
+  const data = await response.json()
+
+  if (!response.ok) {
+    const fullError = data.error ? JSON.stringify(data.error) : 'Unknown error'
+    console.error('[ig-api] Fetch comments error:', fullError)
+    throw new InstagramDMError(response.status, data.error?.code, `Fetch comments failed: ${data.error?.message || 'Unknown'}`)
+  }
+
+  console.log(`[ig-api] Fetched ${data.data?.length || 0} comments for media ${mediaId}`)
+  return data.data || []
+}
+
+/**
+ * Send a DM triggered by a comment.
+ * Method A (RECOMMENDED for comment-triggered DMs):
+ * POST https://graph.facebook.com/v19.0/me/messages
+ * Body: { recipient: { comment_id: "COMMENT_ID" }, message: { text: "..." }, messaging_type: "RESPONSE" }
+ * Query: access_token={page_access_token}
+ * 
+ * This has fewer permission requirements than sending a DM to a user ID.
+ */
+export async function sendDMToCommenter(
+  commentId: string,
+  messageText: string,
+  pageAccessToken: string
+): Promise<{ message_id: string }> {
+  const decryptedToken = decryptToken(pageAccessToken)
+  if (!decryptedToken) {
+    throw new InstagramDMError(401, null, 'Failed to decrypt page access token')
+  }
+
+  const truncatedMessage = messageText.substring(0, 1000)
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(decryptedToken)}`
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      recipient: { comment_id: commentId },
+      message: { text: truncatedMessage },
+      messaging_type: 'RESPONSE',
+    }),
+  })
+
+  const data = await response.json()
+
+  if (!response.ok) {
+    const errorCode = data.error?.code
+    const errorMessage = data.error?.message || 'Unknown error'
+    const fullError = data.error ? JSON.stringify(data.error) : errorMessage
+    console.error('[ig-api] DM via comment_id failed:', fullError)
+    throw new InstagramDMError(response.status, errorCode, `DM failed: ${errorMessage}`)
+  }
+
+  console.log('[ig-api] DM sent successfully via comment_id:', commentId, 'message_id:', data.message_id)
+  return data
+}
+
+/**
+ * Send a DM to an Instagram user (used for DM-triggered automations).
+ * Method B:
+ * POST https://graph.facebook.com/v19.0/me/messages
+ * Body: { recipient: { id: "INSTAGRAM_USER_SCOPED_ID" }, message: { text: "..." }, messaging_type: "RESPONSE" }
+ * Query: access_token={page_access_token}
+ */
+export async function sendInstagramDM(
+  recipientId: string,
+  messageText: string,
+  pageAccessToken: string
+): Promise<string> {
+  const decryptedToken = decryptToken(pageAccessToken)
+  if (!decryptedToken) {
+    throw new InstagramDMError(401, null, 'Failed to decrypt page access token')
+  }
+
+  const truncatedMessage = messageText.substring(0, 1000)
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(decryptedToken)}`
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      recipient: { id: recipientId },
+      message: { text: truncatedMessage },
+      messaging_type: 'RESPONSE',
+    }),
+  })
+
+  const data = await response.json()
+
+  if (!response.ok) {
+    const errorCode = data.error?.code
+    const errorMessage = data.error?.message || 'Unknown error'
+
+    if (response.status === 429) {
+      throw new InstagramDMError(429, errorCode, `Rate limited: ${errorMessage}`)
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new InstagramDMError(response.status, errorCode, `Auth failed: ${errorMessage}`)
+    }
+
+    throw new InstagramDMError(response.status, errorCode, errorMessage)
+  }
+
+  const messageId = data.message_id
+  if (!messageId) {
+    throw new InstagramDMError(500, null, 'No message ID in response')
+  }
+
+  console.log('[ig-api] DM sent successfully, message ID:', messageId)
+  return messageId
+}
+
+/**
+ * Reply publicly to a comment on a reel.
+ * POST https://graph.facebook.com/v19.0/{comment-id}/replies
+ * Body: { "message": "your reply text" }
+ * Query: access_token={page_access_token}
+ * Requires: instagram_manage_comments permission
+ */
+export async function replyToComment(
+  commentId: string,
+  messageText: string,
+  pageAccessToken: string
+): Promise<{ id: string }> {
+  const decryptedToken = decryptToken(pageAccessToken)
+  if (!decryptedToken) {
+    throw new InstagramDMError(401, null, 'Failed to decrypt page access token')
+  }
+
+  const truncatedMessage = messageText.substring(0, 1000)
+  const url = `https://graph.facebook.com/v19.0/${commentId}/replies?access_token=${encodeURIComponent(decryptedToken)}`
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: truncatedMessage }),
+  })
+
+  const data = await response.json()
+
+  if (!response.ok) {
+    const errorMessage = data.error?.message || 'Unknown error'
+    const fullError = data.error ? JSON.stringify(data.error) : errorMessage
+    console.error('[ig-api] Reply to comment error:', fullError)
+    throw new InstagramDMError(response.status, data.error?.code, `Reply failed: ${errorMessage}`)
+  }
+
+  console.log('[ig-api] Reply to comment sent:', JSON.stringify(data))
+  return data
+}
+
+/**
+ * Send a DM triggered by a comment (legacy method using private_replies endpoint).
+ * Kept for backward compatibility but sendDMToCommenter is preferred.
+ */
+export async function sendInstagramPrivateReply(
+  commentId: string,
+  messageText: string,
+  pageAccessToken: string
+): Promise<{ id: string }> {
+  const decryptedToken = decryptToken(pageAccessToken)
+  if (!decryptedToken) {
+    throw new InstagramDMError(401, null, 'Failed to decrypt page access token')
+  }
+
+  const truncatedMessage = messageText.substring(0, 1000)
+  const url = `https://graph.facebook.com/v19.0/${commentId}/private_replies?access_token=${encodeURIComponent(decryptedToken)}`
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: truncatedMessage }),
+  })
+
+  const data = await response.json()
+
+  if (!response.ok) {
+    const errorMessage = data.error?.message || 'Unknown error'
+    const fullError = data.error ? JSON.stringify(data.error) : errorMessage
+    console.error('[ig-api] Private reply error:', fullError)
+    throw new InstagramDMError(response.status, data.error?.code, `Private reply failed: ${errorMessage}`)
+  }
+
+  console.log('[ig-api] Private reply sent:', JSON.stringify(data))
+  return data
+}
+
+/**
+ * Retry sending a DM with exponential backoff.
  */
 export async function sendInstagramDMWithRetry(
   recipientId: string,
@@ -135,241 +278,78 @@ export async function sendInstagramDMWithRetry(
     try {
       return await sendInstagramDM(recipientId, messageText, accessToken)
     } catch (error) {
-      if (!(error instanceof InstagramDMError)) {
-        throw error
-      }
-
+      if (!(error instanceof InstagramDMError)) throw error
       lastError = error
+      if (error.statusCode === 401 || error.statusCode === 403) throw error
 
-      // Don't retry auth errors
-      if (error.statusCode === 401 || error.statusCode === 403) {
-        throw error
-      }
-
-      // Calculate exponential backoff delay
-      // 1st retry: 2 seconds, 2nd retry: 4 seconds, 3rd retry: 8 seconds
       const delayMs = Math.pow(2, attempt + 1) * 1000
-
       if (attempt < maxRetries - 1) {
-        console.log(
-          `[instagram] Retry attempt ${attempt + 1}/${maxRetries - 1}, waiting ${delayMs}ms`
-        )
+        console.log(`[ig-api] Retry ${attempt + 1}/${maxRetries - 1}, waiting ${delayMs}ms`)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
     }
   }
-
-  // All retries exhausted
-  if (lastError) {
-    throw lastError
-  }
-
-  throw new InstagramDMError(500, null, 'Failed to send DM after all retries')
+  if (lastError) throw lastError
+  throw new InstagramDMError(500, null, 'Failed after all retries')
 }
 
 /**
- * Send a private reply to an Instagram comment via the private_replies API.
- * POST https://graph.instagram.com/v21.0/{ig-comment-id}/private_replies
- *
- * This is the correct endpoint for sending automated DM replies to commenters.
- */
-export async function sendInstagramPrivateReply(
-  commentId: string,
-  messageText: string,
-  accessToken: string
-): Promise<{ id: string }> {
-  try {
-    console.log('[instagram] Sending private reply to comment:', commentId)
-
-    if (!accessToken) {
-      throw new InstagramDMError(401, null, 'Instagram access token not found')
-    }
-
-    const decryptedToken = decryptToken(accessToken)
-    if (!decryptedToken) {
-      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
-    }
-
-    // Instagram DM limit is ~1000 chars
-    const truncatedMessage = messageText.substring(0, 1000)
-
-    // Meta Graph API requires access_token as a query parameter, NOT in the JSON body
-    // Ref: https://developers.facebook.com/docs/instagram-api/reference/ig-comment/private_replies
-    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
-    const url = `https://graph.facebook.com/v21.0/${commentId}/private_replies?access_token=${encodeURIComponent(decryptedToken)}`
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: truncatedMessage,
-      }),
-    })
-
-    const data = await response.json()
-
-    if (!response.ok) {
-      const errorCode = data.error?.code
-      const errorMessage = data.error?.message || 'Unknown error'
-      const fullError = data.error ? JSON.stringify(data.error) : errorMessage
-
-      if (response.status === 429) {
-        console.warn('[instagram] Rate limited on private reply:', errorMessage)
-        throw new InstagramDMError(429, errorCode, `Rate limited: ${errorMessage}`)
-      }
-
-      if (response.status === 401 || response.status === 403) {
-        console.error('[instagram] Auth failure on private reply:', fullError)
-        throw new InstagramDMError(response.status, errorCode, `Auth failed: ${errorMessage}`)
-      }
-
-      console.error('[instagram] Private reply API error:', fullError)
-      throw new InstagramDMError(response.status, errorCode, errorMessage)
-    }
-
-    console.log('[instagram] Private reply sent successfully, response:', JSON.stringify(data))
-    return data
-  } catch (error) {
-    if (error instanceof InstagramDMError) {
-      throw error
-    }
-    console.error('[instagram] Unexpected error sending private reply:', error)
-    throw new InstagramDMError(
-      500,
-      null,
-      `Unexpected error: ${error instanceof Error ? error.message : String(error)}`
-    )
-  }
-}
-
-/**
- * Reply to an Instagram comment publicly via the Graph API.
- * POST https://graph.instagram.com/v21.0/{ig-comment-id}/replies
- *
- * This replies publicly to the comment on the reel/post.
- */
-export async function replyToComment(
-  commentId: string,
-  messageText: string,
-  accessToken: string
-): Promise<{ id: string }> {
-  try {
-    console.log('[instagram] Replying to comment:', commentId)
-
-    if (!accessToken) {
-      throw new InstagramDMError(401, null, 'Instagram access token not found')
-    }
-
-    const decryptedToken = decryptToken(accessToken)
-    if (!decryptedToken) {
-      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
-    }
-
-    const truncatedMessage = messageText.substring(0, 1000)
-
-    // Meta Graph API requires access_token as query param
-    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
-    const url = `https://graph.facebook.com/v21.0/${commentId}/replies?access_token=${encodeURIComponent(decryptedToken)}`
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: truncatedMessage,
-      }),
-    })
-
-    const data = await response.json()
-
-    if (!response.ok) {
-      const errorMessage = data.error?.message || 'Unknown error'
-      const fullError = data.error ? JSON.stringify(data.error) : errorMessage
-      console.error('[instagram] Reply to comment API error:', fullError)
-      throw new InstagramDMError(response.status, data.error?.code, errorMessage)
-    }
-
-    console.log('[instagram] Reply to comment sent successfully:', JSON.stringify(data))
-    return data
-  } catch (error) {
-    if (error instanceof InstagramDMError) throw error
-    console.error('[instagram] Unexpected error replying to comment:', error)
-    throw new InstagramDMError(500, null, `Unexpected error: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-/**
- * Fetch comments for a specific media (reel/post) from Instagram.
- * GET https://graph.instagram.com/v21.0/{mediaId}/comments
- */
-export async function fetchMediaComments(
-  mediaId: string,
-  accessToken: string
-): Promise<any[]> {
-  try {
-    console.log('[instagram] Fetching comments for media:', mediaId)
-
-    const decryptedToken = decryptToken(accessToken)
-    if (!decryptedToken) {
-      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
-    }
-
-    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
-    const url = `https://graph.facebook.com/v21.0/${mediaId}/comments?access_token=${encodeURIComponent(decryptedToken)}&fields=id,text,timestamp,username,from{id,username}`
-    const response = await fetch(url)
-    const data = await response.json()
-
-    if (!response.ok) {
-      const errorMessage = data.error?.message || 'Unknown error'
-      console.error('[instagram] Fetch comments API error:', errorMessage)
-      throw new InstagramDMError(response.status, data.error?.code, errorMessage)
-    }
-
-    console.log(`[instagram] Fetched ${data.data?.length || 0} comments for media ${mediaId}`)
-    return data.data || []
-  } catch (error) {
-    if (error instanceof InstagramDMError) throw error
-    console.error('[instagram] Unexpected error fetching comments:', error)
-    throw new InstagramDMError(500, null, `Unexpected error: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-/**
- * Send a DM with a link
- * Instagram allows including URLs, they'll be shortened in the UI
- */
-export async function sendInstagramDMWithLink(
-  recipientId: string,
-  messageText: string,
-  linkUrl: string,
-  accessToken: string
-): Promise<string> {
-  const fullMessage = `${messageText}\n\n${linkUrl}`
-  return sendInstagramDMWithRetry(recipientId, fullMessage, accessToken)
-}
-
-/**
- * Get Instagram account info from Meta
- * Useful for validating tokens and getting user details
+ * Fetch Instagram business account info.
  */
 export async function getInstagramAccountInfo(accessToken: string): Promise<any> {
-  try {
-    const decryptedToken = decryptToken(accessToken)
+  const decryptedToken = decryptToken(accessToken)
+  const response = await fetch(
+    `https://graph.facebook.com/v19.0/me?fields=id,name,instagram_business_account&access_token=${decryptedToken}`
+  )
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error?.message || 'Failed to get account info')
+  return data
+}
 
-    const response = await fetch(
-      `https://graph.facebook.com/v19.0/me?fields=id,name,instagram_business_account&access_token=${decryptedToken}`
-    )
+/**
+ * Debug token: Check token validity, scopes, and expiry.
+ * GET https://graph.facebook.com/debug_token?input_token={token}&access_token={app_id}|{app_secret}
+ */
+export async function debugToken(token: string): Promise<any> {
+  const appId = process.env.INSTAGRAM_APP_ID
+  const appSecret = process.env.INSTAGRAM_APP_SECRET
+  const appAccessToken = `${appId}|${appSecret}`
 
-    const data = await response.json()
+  const url = `https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(token)}&access_token=${encodeURIComponent(appAccessToken)}`
+  const resp = await fetch(url.toString())
+  const data = await resp.json()
 
-    if (!response.ok) {
-      throw new Error(data.error?.message || 'Failed to get account info')
-    }
-
-    return data
-  } catch (error) {
-    console.error('[instagram] Failed to get account info:', error)
-    throw error
+  if (!resp.ok) {
+    throw new Error(data.error?.message || 'Token debug failed')
   }
+  return data.data
+}
+
+/**
+ * Exchange a short-lived Facebook Page Access Token for a long-lived one (60 days).
+ * 
+ * GET https://graph.facebook.com/v19.0/oauth/access_token
+ *   ?grant_type=fb_exchange_token
+ *   &client_id={app_id}
+ *   &client_secret={app_secret}
+ *   &fb_exchange_token={short_lived_page_token}
+ */
+export async function getLongLivedPageToken(shortLivedPageToken: string): Promise<string> {
+  const appId = process.env.INSTAGRAM_APP_ID
+  const appSecret = process.env.INSTAGRAM_APP_SECRET
+
+  const url = new URL('https://graph.facebook.com/v19.0/oauth/access_token')
+  url.searchParams.set('grant_type', 'fb_exchange_token')
+  url.searchParams.set('client_id', appId!)
+  url.searchParams.set('client_secret', appSecret!)
+  url.searchParams.set('fb_exchange_token', shortLivedPageToken)
+
+  const resp = await fetch(url.toString())
+  const data = await resp.json()
+
+  if (!resp.ok) {
+    throw new Error('Page token exchange failed: ' + (data.error?.message || resp.statusText))
+  }
+
+  return data.access_token
 }

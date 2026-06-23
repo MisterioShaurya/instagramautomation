@@ -4,7 +4,8 @@ import { connectDB } from '@/lib/mongodb'
 import AutomationRule from '@/models/AutomationRule'
 import User from '@/models/User'
 import SentReply from '@/models/SentReply'
-import { sendInstagramPrivateReply, replyToComment } from '@/lib/instagram-api'
+import ActivityLog from '@/models/ActivityLog'
+import { sendDMToCommenter, replyToComment } from '@/lib/instagram-api'
 
 // ──────────────────────────────────────────────
 // 1. GET — Meta Webhook Verification Handshake
@@ -50,7 +51,6 @@ export async function GET(request: NextRequest) {
 // ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
-    // ── Verify X-Hub-Signature-256 ──────────
     const signature = request.headers.get('x-hub-signature-256')
     if (!signature) {
       console.warn('[webhook] Missing X-Hub-Signature-256 header')
@@ -64,32 +64,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    const hash = crypto
-      .createHmac('sha256', appSecret)
-      .update(bodyText)
-      .digest('hex')
+    const hash = crypto.createHmac('sha256', appSecret).update(bodyText).digest('hex')
     const expectedSignature = `sha256=${hash}`
 
     const sigBuf = Buffer.from(signature)
     const expBuf = Buffer.from(expectedSignature)
-    if (
-      sigBuf.length !== expBuf.length ||
-      !crypto.timingSafeEqual(sigBuf, expBuf)
-    ) {
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
       console.warn('[webhook] Invalid signature — rejecting')
       return NextResponse.json({ error: 'Invalid signature' }, { status: 403 })
     }
 
     console.log('[webhook] Signature verified')
 
-    // ── Parse payload ────────────────────────
     const payload = JSON.parse(bodyText)
-
     if (payload.object !== 'instagram') {
       return NextResponse.json({ ok: true })
     }
 
-    // Process each entry (fire-and-forget: we ack Meta immediately)
+    // Process each entry (fire-and-forget: ack Meta immediately)
     for (const entry of payload.entry || []) {
       for (const change of entry.changes || []) {
         if (change.field === 'comments') {
@@ -139,11 +131,8 @@ async function processCommentEvent(eventData: CommentEvent) {
 
   console.log('[webhook] Processing comment', { commentId, mediaId, commenterId, text: commentText })
 
-  // ── Look up active AutomationRules for this media ──
-  const rules = await AutomationRule.find({
-    mediaId,
-    active: true,
-  }).lean()
+  // Look up active AutomationRules for this media
+  const rules = await AutomationRule.find({ mediaId, active: true }).lean()
 
   if (!rules.length) {
     console.log('[webhook] No matching AutomationRules for media:', mediaId)
@@ -152,7 +141,6 @@ async function processCommentEvent(eventData: CommentEvent) {
 
   console.log(`[webhook] Found ${rules.length} AutomationRules for media ${mediaId}`)
 
-  // ── Match each rule against the comment text ──
   for (const rule of rules) {
     const keyword = (rule.keyword || '').toLowerCase()
     const commentLower = commentText.toLowerCase()
@@ -166,77 +154,67 @@ async function processCommentEvent(eventData: CommentEvent) {
 
     if (!matched) continue
 
-    console.log(`[webhook] Rule ${rule._id} matched keyword "${rule.keyword}" (${rule.matchType})`)
+    console.log(`[webhook] Rule ${rule._id} matched keyword "${rule.keyword}"`)
 
-    // ── Check SentReplies dedup ─────────────────
-    const alreadySent = await SentReply.findOne({
-      ruleId: rule._id,
-      commentId,
-    }).lean()
-
+    // Check SentReplies dedup
+    const alreadySent = await SentReply.findOne({ ruleId: rule._id, commentId }).lean()
     if (alreadySent) {
       console.log('[webhook] Already replied to this comment for rule:', rule._id)
       continue
     }
 
-    // ── Find the media owner's access token ─────
+    // Find the media owner — get pageAccessToken first, fall back to user token
     const mediaOwner = await User.findById(rule.userId)
-      .select('instagramAccessToken')
+      .select('pageAccessToken instagramAccessToken')
       .lean()
 
-    if (!mediaOwner?.instagramAccessToken) {
+    if (!mediaOwner) {
+      console.warn('[webhook] User not found:', rule.userId)
+      continue
+    }
+
+    // Use pageAccessToken for all operations (required for comments/DMs/replies)
+    const tokenToUse = mediaOwner.pageAccessToken || mediaOwner.instagramAccessToken
+    if (!tokenToUse) {
       console.warn('[webhook] No access token found for user:', rule.userId)
+      await logActivity(rule.userId, rule._id, 'failed', 'No access token available')
       continue
     }
 
     const dmMessage = rule.dmMessage || ''
     const commentReplyMessage = rule.commentReplyMessage || ''
 
-    // ── Step 1: Reply publicly to the comment (if commentReplyMessage is set) ──
+    // Step 1: Reply publicly to the comment (if commentReplyMessage is set)
     let commentReplySuccess = false
+    let commentReplyError: string | null = null
     if (commentReplyMessage) {
       try {
         console.log('[webhook] Replying publicly to comment:', commentId)
-        await replyToComment(commentId, commentReplyMessage, mediaOwner.instagramAccessToken)
-        console.log('[webhook] Public reply sent successfully for comment:', commentId)
+        await replyToComment(commentId, commentReplyMessage, tokenToUse)
+        console.log('[webhook] Public reply sent successfully')
         commentReplySuccess = true
       } catch (error: any) {
-        console.error('[webhook] Failed to reply publicly to comment', {
-          ruleId: rule._id,
-          commentId,
-          error: error.message,
-          statusCode: error.statusCode,
-        })
-        // Continue to DM even if public reply fails
+        commentReplyError = `Meta error ${error.metaErrorCode || error.statusCode}: ${error.message}`
+        console.error('[webhook] Failed to reply publicly:', commentReplyError)
       }
     }
 
-    // ── Step 2: Send private reply (DM) ────
+    // Step 2: Send DM via comment_id method (RECOMMENDED)
     let dmSuccess = false
+    let dmError: string | null = null
     if (dmMessage) {
       try {
-        const result = await sendInstagramPrivateReply(
-          commentId,
-          dmMessage,
-          mediaOwner.instagramAccessToken
-        )
-        console.log('[webhook] Private reply (DM) sent successfully', {
-          ruleId: rule._id,
-          commentId,
-          result,
-        })
+        console.log('[webhook] Sending DM via comment_id:', commentId)
+        const result = await sendDMToCommenter(commentId, dmMessage, tokenToUse)
+        console.log('[webhook] DM sent successfully:', result.message_id)
         dmSuccess = true
       } catch (error: any) {
-        console.error('[webhook] Failed to send private reply (DM)', {
-          ruleId: rule._id,
-          commentId,
-          error: error.message,
-          statusCode: error.statusCode,
-        })
+        dmError = `Meta error ${error.metaErrorCode || error.statusCode}: ${error.message}`
+        console.error('[webhook] Failed to send DM:', dmError)
       }
     }
 
-    // ── Mark as processed even if one action succeeded ──
+    // Log to SentReplies
     if (commentReplySuccess || dmSuccess) {
       await SentReply.create({
         ruleId: rule._id,
@@ -245,9 +223,38 @@ async function processCommentEvent(eventData: CommentEvent) {
         sentAt: new Date(),
         replyType: commentReplySuccess && dmSuccess ? 'both' : commentReplySuccess ? 'comment' : 'dm',
       })
-      console.log('[webhook] Logged sent reply to SentReplies for dedup')
-    } else {
-      console.warn('[webhook] Both public reply and DM failed — not logging in SentReplies')
+      console.log('[webhook] Logged sent reply to SentReplies')
     }
+
+    // Log to ActivityLog with full error details
+    if (dmError || commentReplyError) {
+      await logActivity(
+        rule.userId,
+        rule._id,
+        'failed',
+        `Comment: ${commentId} | Reply: ${commentReplyError || 'OK'} | DM: ${dmError || 'OK'}`
+      )
+    } else if (commentReplySuccess || dmSuccess) {
+      await logActivity(
+        rule.userId,
+        rule._id,
+        'success',
+        `Replied to comment ${commentId} on media ${mediaId}`
+      )
+    }
+  }
+}
+
+async function logActivity(userId: any, ruleId: any, status: string, description: string) {
+  try {
+    await ActivityLog.create({
+      userId,
+      automationId: ruleId,
+      type: status === 'success' ? 'response' : 'error',
+      description,
+      metadata: { status, timestamp: new Date().toISOString() },
+    })
+  } catch (e) {
+    console.error('[webhook] Failed to log activity:', e)
   }
 }

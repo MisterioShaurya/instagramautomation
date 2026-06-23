@@ -29,7 +29,11 @@ const userSchema = new mongoose.Schema(
     instagramPageId: String, // Facebook Page ID (needed for webhooks)
     instagramAccountId: String, // Instagram Business Account ID (used to match incoming webhooks)
     instagramAccessToken: {
-      type: String, // Encrypted before storage
+      type: String, // Encrypted Facebook User Access Token
+      default: null,
+    },
+    pageAccessToken: {
+      type: String, // Encrypted Facebook Page Access Token (needed for comments, DMs, replies)
       default: null,
     },
     // Meta App credentials for webhook verification

@@ -156,6 +156,16 @@ export async function GET(request: NextRequest) {
     console.log('[instagram-oauth] Getting Page Access Token...')
     const pageAccessToken = await getPageAccessToken(pageId, longLivedUserToken)
     console.log('[instagram-oauth] Got Page Access Token')
+    
+    // Also get a long-lived page token (60 days)
+    let longLivedPageToken = pageAccessToken
+    try {
+      const { getLongLivedPageToken } = await import('@/lib/instagram-api')
+      longLivedPageToken = await getLongLivedPageToken(pageAccessToken)
+      console.log('[instagram-oauth] Got long-lived Page Access Token')
+    } catch (e) {
+      console.warn('[instagram-oauth] Could not get long-lived page token, using short-lived:', e)
+    }
 
     // Step 5: Save user in database
     await connectDB()
@@ -165,8 +175,10 @@ export async function GET(request: NextRequest) {
     let userId: string
 
     if (existingUser) {
-      const encryptedToken = encryptToken(pageAccessToken)
-      existingUser.instagramAccessToken = encryptedToken
+      const encryptedUserToken = encryptToken(longLivedUserToken)
+      const encryptedPageToken = encryptToken(longLivedPageToken)
+      existingUser.instagramAccessToken = encryptedUserToken
+      existingUser.pageAccessToken = encryptedPageToken
       existingUser.instagramAccessTokenEncrypted = true
       existingUser.username = igUsername
       existingUser.profilePictureUrl = igProfilePic || existingUser.profilePictureUrl
@@ -178,7 +190,8 @@ export async function GET(request: NextRequest) {
       userId = existingUser._id.toString()
       console.log('[instagram-oauth] Updated existing user:', userId)
     } else {
-      const encryptedToken = encryptToken(pageAccessToken)
+      const encryptedUserToken = encryptToken(longLivedUserToken)
+      const encryptedPageToken = encryptToken(longLivedPageToken)
       const placeholderEmail = 'ig_' + igUserId + '@placeholder.local'
       const newUser = await User.create({
         email: placeholderEmail,
@@ -188,7 +201,8 @@ export async function GET(request: NextRequest) {
         profilePictureUrl: igProfilePic,
         instagramHandle: igUsername,
         instagramConnected: true,
-        instagramAccessToken: encryptedToken,
+        instagramAccessToken: encryptedUserToken,
+        pageAccessToken: encryptedPageToken,
         instagramAccessTokenEncrypted: true,
         instagramPageId: pageId,
         instagramAccountId: igUserId,
