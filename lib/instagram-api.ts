@@ -195,7 +195,8 @@ export async function sendInstagramPrivateReply(
 
     // Meta Graph API requires access_token as a query parameter, NOT in the JSON body
     // Ref: https://developers.facebook.com/docs/instagram-api/reference/ig-comment/private_replies
-    const url = `https://graph.instagram.com/v21.0/${commentId}/private_replies?access_token=${encodeURIComponent(decryptedToken)}`
+    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
+    const url = `https://graph.facebook.com/v21.0/${commentId}/private_replies?access_token=${encodeURIComponent(decryptedToken)}`
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -268,7 +269,8 @@ export async function replyToComment(
     const truncatedMessage = messageText.substring(0, 1000)
 
     // Meta Graph API requires access_token as query param
-    const url = `https://graph.instagram.com/v21.0/${commentId}/replies?access_token=${encodeURIComponent(decryptedToken)}`
+    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
+    const url = `https://graph.facebook.com/v21.0/${commentId}/replies?access_token=${encodeURIComponent(decryptedToken)}`
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -313,7 +315,8 @@ export async function fetchMediaComments(
       throw new InstagramDMError(401, null, 'Failed to decrypt access token')
     }
 
-    const url = `https://graph.instagram.com/v21.0/${mediaId}/comments?access_token=${encodeURIComponent(decryptedToken)}&fields=id,text,timestamp,username,from{id,username}`
+    // Use graph.facebook.com (works with Page Access Tokens from Facebook Login)
+    const url = `https://graph.facebook.com/v21.0/${mediaId}/comments?access_token=${encodeURIComponent(decryptedToken)}&fields=id,text,timestamp,username,from{id,username}`
     const response = await fetch(url)
     const data = await response.json()
 
