@@ -5,45 +5,40 @@ export async function GET() {
   const redirectUri = process.env.INSTAGRAM_REDIRECT_URI
 
   if (!clientId || !redirectUri) {
+    console.error('[instagram-oauth-start] Missing config:', { hasClientId: !!clientId, hasRedirectUri: !!redirectUri })
     return NextResponse.json(
-      { error: 'Instagram OAuth not configured' },
+      { error: 'Instagram OAuth not configured. Check INSTAGRAM_APP_ID and INSTAGRAM_REDIRECT_URI in .env' },
       { status: 500 }
     )
   }
 
-  // Use Facebook Login OAuth which gives tokens capable of:
-  // - Comment replying (private_replies API)
-  // - DM sending (messaging API)
-  // - Reading comments
-  //
-  // The following permissions are REQUIRED for the Instagram DM automation:
-  // - instagram_basic: basic profile access
-  // - instagram_manage_comments: reply to comments
-  // - instagram_manage_messages: send DMs
-  // - pages_manage_metadata: needed for Facebook Page token
-  // - pages_read_engagement: read Page engagement
-  // - pages_manage_messages: send messages on behalf of Page
-  const scope = [
+  // CRITICAL: These scopes are REQUIRED for the Instagram DM automation to work.
+  // Without pages_show_list and business_management, we cannot get the page access token.
+  // Without instagram_manage_comments, we cannot reply to comments.
+  // Without instagram_manage_messages, we cannot send DMs.
+  const SCOPES = [
     'instagram_basic',
     'instagram_manage_comments',
     'instagram_manage_messages',
-    'pages_manage_metadata',
+    'pages_show_list',
     'pages_read_engagement',
-    'pages_manage_messages',
+    'pages_manage_metadata',
+    'pages_messaging',
+    'business_management',
   ].join(',')
 
-  // Use Facebook OAuth endpoint (NOT Instagram Basic Display)
-  // The Instagram Graph API (v21.0) requires a Facebook User Token
-  // that has been granted the Instagram permissions above.
-  const authUrl = new URL('https://www.facebook.com/v21.0/dialog/oauth')
-  authUrl.searchParams.set('client_id', clientId)
-  authUrl.searchParams.set('redirect_uri', redirectUri)
-  authUrl.searchParams.set('scope', scope)
-  authUrl.searchParams.set('response_type', 'code')
+  // Use Facebook Login OAuth v19.0
+  // auth_type=rerequest forces Meta to show the permissions dialog even if user connected before
+  const authUrl = `https://www.facebook.com/v19.0/dialog/oauth?` +
+    `client_id=${clientId}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${encodeURIComponent(SCOPES)}` +
+    `&response_type=code` +
+    `&auth_type=rerequest`
 
-  console.log('[instagram-oauth] Starting OAuth with Facebook Login')
-  console.log('[instagram-oauth] Redirect URI:', redirectUri)
-  console.log('[instagram-oauth] Scopes:', scope)
+  console.log('[instagram-oauth-start] Redirecting to Facebook OAuth')
+  console.log('[instagram-oauth-start] Redirect URI:', redirectUri)
+  console.log('[instagram-oauth-start] Scopes:', SCOPES)
 
-  return NextResponse.redirect(authUrl.toString())
+  return NextResponse.redirect(authUrl)
 }

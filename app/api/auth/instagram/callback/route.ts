@@ -5,231 +5,244 @@ import { encryptToken } from '@/lib/encryption'
 import { signToken } from '@/lib/jwt'
 import { createSessionCookie } from '@/lib/session-server'
 
-/**
- * Exchange authorization code for a Facebook User Access Token
- */
-async function exchangeCodeForToken(code: string): Promise<{ access_token: string; token_type: string; expires_in: number }> {
-  const appId = process.env.INSTAGRAM_APP_ID
-  const appSecret = process.env.INSTAGRAM_APP_SECRET
-  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI
-
-  const resp = await fetch('https://graph.facebook.com/v21.0/oauth/access_token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: appId!,
-      client_secret: appSecret!,
-      grant_type: 'authorization_code',
-      redirect_uri: redirectUri!,
-      code,
-    }),
-  })
-
-  if (!resp.ok) {
-    const errBody = await resp.text()
-    throw new Error('Facebook token exchange failed: ' + resp.status + ' ' + errBody)
-  }
-
-  return resp.json()
-}
-
-/**
- * Get long-lived Facebook User Access Token (60 days)
- */
-async function getLongLivedToken(shortLivedToken: string): Promise<{ access_token: string; token_type: string; expires_in: number }> {
-  const appSecret = process.env.INSTAGRAM_APP_SECRET
-
-  const url = new URL('https://graph.facebook.com/v21.0/oauth/access_token')
-  url.searchParams.set('grant_type', 'fb_exchange_token')
-  url.searchParams.set('client_id', process.env.INSTAGRAM_APP_ID!)
-  url.searchParams.set('client_secret', appSecret!)
-  url.searchParams.set('fb_exchange_token', shortLivedToken)
-
-  const resp = await fetch(url.toString())
-
-  if (!resp.ok) {
-    const errBody = await resp.text()
-    throw new Error('Long-lived token exchange failed: ' + resp.status + ' ' + errBody)
-  }
-
-  return resp.json()
-}
-
-/**
- * Get Facebook Pages the user manages (to find the Instagram business account)
- */
-async function getFacebookPages(accessToken: string): Promise<any[]> {
-  const url = new URL('https://graph.facebook.com/v21.0/me/accounts')
-  url.searchParams.set('access_token', accessToken)
-  url.searchParams.set('fields', 'id,name,instagram_business_account{id,username,profile_picture_url}')
-
-  const resp = await fetch(url.toString())
-  const data = await resp.json()
-
-  if (!resp.ok) {
-    throw new Error('Failed to fetch pages: ' + (data.error?.message || resp.statusText))
-  }
-
-  return data.data || []
-}
-
-/**
- * Get a Page Access Token for the specific page
- */
-async function getPageAccessToken(pageId: string, userAccessToken: string): Promise<string> {
-  const url = new URL(`https://graph.facebook.com/v21.0/${pageId}`)
-  url.searchParams.set('access_token', userAccessToken)
-  url.searchParams.set('fields', 'access_token')
-
-  const resp = await fetch(url.toString())
-  const data = await resp.json()
-
-  if (!resp.ok) {
-    throw new Error('Failed to get page token: ' + (data.error?.message || resp.statusText))
-  }
-
-  return data.access_token
-}
-
 export async function GET(request: NextRequest) {
   try {
     const code = request.nextUrl.searchParams.get('code')
     const error = request.nextUrl.searchParams.get('error')
+    const errorReason = request.nextUrl.searchParams.get('error_reason')
+    const errorDescription = request.nextUrl.searchParams.get('error_description')
 
     if (error) {
-      console.error('[instagram-oauth] Facebook returned error:', error)
+      console.error('[instagram-oauth] Facebook returned error:', { error, errorReason, errorDescription })
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('error', 'instagram_denied')
+      loginUrl.searchParams.set('message', errorDescription || errorReason || error)
       return NextResponse.redirect(loginUrl)
     }
 
     if (!code) {
+      console.error('[instagram-oauth] No code received')
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('error', 'no_code')
       return NextResponse.redirect(loginUrl)
     }
 
-    // Step 1: Exchange code for short-lived Facebook User Access Token
-    console.log('[instagram-oauth] Exchanging code for Facebook User Token...')
-    const tokenData = await exchangeCodeForToken(code)
-    const shortLivedToken = tokenData.access_token
-    console.log('[instagram-oauth] Got short-lived token')
+    const appId = process.env.INSTAGRAM_APP_ID
+    const appSecret = process.env.INSTAGRAM_APP_SECRET
+    const redirectUri = process.env.INSTAGRAM_REDIRECT_URI
 
-    // Step 2: Exchange for long-lived Facebook User Access Token
-    console.log('[instagram-oauth] Getting long-lived Facebook User Token...')
-    const longLivedData = await getLongLivedToken(shortLivedToken)
-    const longLivedUserToken = longLivedData.access_token
-    const expiresIn = longLivedData.expires_in
-    console.log('[instagram-oauth] Got long-lived token, expires in', expiresIn, 'seconds')
+    if (!appId || !appSecret || !redirectUri) {
+      console.error('[instagram-oauth] Missing config:', { hasAppId: !!appId, hasAppSecret: !!appSecret, hasRedirectUri: !!redirectUri })
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('error', 'config_error')
+      return NextResponse.redirect(loginUrl)
+    }
 
-    // Step 3: Get Facebook Pages to find Instagram Business Account
-    console.log('[instagram-oauth] Fetching Facebook Pages...')
-    const pages = await getFacebookPages(longLivedUserToken)
-    console.log(`[instagram-oauth] Found ${pages.length} pages`)
+    // ============================================================
+    // STEP A: Exchange code for short-lived Facebook User Access Token
+    // ============================================================
+    console.log('[instagram-oauth] STEP A: Exchanging code for short-lived user token...')
+    const tokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?` +
+      `client_id=${appId}` +
+      `&client_secret=${appSecret}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&code=${code}`
+
+    const tokenResp = await fetch(tokenUrl)
+    const tokenData = await tokenResp.json()
+
+    if (!tokenResp.ok) {
+      const errMsg = tokenData.error?.message || tokenResp.statusText
+      console.error('[instagram-oauth] STEP A failed:', errMsg, JSON.stringify(tokenData.error))
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('error', 'token_exchange_failed')
+      loginUrl.searchParams.set('message', errMsg)
+      return NextResponse.redirect(loginUrl)
+    }
+
+    const shortLivedUserToken = tokenData.access_token
+    console.log('[instagram-oauth] STEP A: Got short-lived user token')
+
+    // ============================================================
+    // STEP B: Exchange for long-lived Facebook User Access Token (60 days)
+    // ============================================================
+    console.log('[instagram-oauth] STEP B: Getting long-lived user token...')
+    const longTokenUrl = `https://graph.facebook.com/v19.0/oauth/access_token?` +
+      `grant_type=fb_exchange_token` +
+      `&client_id=${appId}` +
+      `&client_secret=${appSecret}` +
+      `&fb_exchange_token=${shortLivedUserToken}`
+
+    const longTokenResp = await fetch(longTokenUrl)
+    const longTokenData = await longTokenResp.json()
+
+    if (!longTokenResp.ok) {
+      const errMsg = longTokenData.error?.message || longTokenResp.statusText
+      console.error('[instagram-oauth] STEP B failed:', errMsg, JSON.stringify(longTokenData.error))
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('error', 'long_token_failed')
+      loginUrl.searchParams.set('message', errMsg)
+      return NextResponse.redirect(loginUrl)
+    }
+
+    const longLivedUserToken = longTokenData.access_token
+    const expiresIn = longTokenData.expires_in || 5184000 // default 60 days
+    console.log('[instagram-oauth] STEP B: Got long-lived user token, expires in', expiresIn, 'seconds')
+
+    // ============================================================
+    // STEP C: Get Facebook Pages list to find the page access token
+    // ============================================================
+    console.log('[instagram-oauth] STEP C: Fetching Facebook Pages...')
+    const pagesUrl = `https://graph.facebook.com/v19.0/me/accounts?access_token=${encodeURIComponent(longLivedUserToken)}`
+    const pagesResp = await fetch(pagesUrl)
+    const pagesData = await pagesResp.json()
+
+    if (!pagesResp.ok) {
+      const errMsg = pagesData.error?.message || pagesResp.statusText
+      console.error('[instagram-oauth] STEP C failed:', errMsg, JSON.stringify(pagesData.error))
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('error', 'pages_fetch_failed')
+      loginUrl.searchParams.set('message', errMsg)
+      return NextResponse.redirect(loginUrl)
+    }
+
+    const pages = pagesData.data || []
+    console.log(`[instagram-oauth] STEP C: Found ${pages.length} pages`)
 
     if (pages.length === 0) {
+      console.error('[instagram-oauth] STEP C: No pages found')
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('error', 'no_pages')
-      loginUrl.searchParams.set('message', 'No Facebook Pages found. You need a Facebook Page connected to an Instagram Business Account.')
+      loginUrl.searchParams.set('message', 'No Facebook Pages found. Create a Facebook Page and connect Instagram Business Account first.')
       return NextResponse.redirect(loginUrl)
     }
 
-    // Find the first page that has an Instagram business account
-    const pageWithIg = pages.find((p: any) => p.instagram_business_account)
-    if (!pageWithIg) {
-      const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('error', 'no_instagram')
-      loginUrl.searchParams.set('message', 'No Instagram Business Account found. Connect Instagram to your Facebook Page first.')
-      return NextResponse.redirect(loginUrl)
+    // Pick the first page (or the one with Instagram Business Account)
+    const page = pages[0]
+    const pageId = page.id
+    const pageName = page.name
+    const pageAccessToken = page.access_token
+
+    console.log('[instagram-oauth] STEP C: Got page:', { pageId, pageName, hasPageToken: !!pageAccessToken })
+
+    // ============================================================
+    // STEP D: Get Instagram Business Account ID linked to this page
+    // ============================================================
+    console.log('[instagram-oauth] STEP D: Getting Instagram Business Account...')
+    const pageUrl = `https://graph.facebook.com/v19.0/${pageId}?fields=instagram_business_account&access_token=${encodeURIComponent(pageAccessToken)}`
+    const pageResp = await fetch(pageUrl)
+    const pageInfo = await pageResp.json()
+
+    let instagramAccountId = ''
+    let instagramUsername = ''
+    let profilePictureUrl = ''
+
+    if (pageResp.ok && pageInfo.instagram_business_account) {
+      instagramAccountId = pageInfo.instagram_business_account.id
+      console.log('[instagram-oauth] STEP D: Found Instagram Business Account:', instagramAccountId)
+
+      // ============================================================
+      // STEP E: Get Instagram username + profile
+      // ============================================================
+      console.log('[instagram-oauth] STEP E: Getting Instagram profile...')
+      const igUrl = `https://graph.facebook.com/v19.0/${instagramAccountId}?fields=id,username,profile_picture_url,followers_count&access_token=${encodeURIComponent(pageAccessToken)}`
+      const igResp = await fetch(igUrl)
+      const igData = await igResp.json()
+
+      if (igResp.ok) {
+        instagramUsername = igData.username || ''
+        profilePictureUrl = igData.profile_picture_url || ''
+        console.log('[instagram-oauth] STEP E: Got Instagram profile:', { username: instagramUsername })
+      } else {
+        console.warn('[instagram-oauth] STEP E failed:', igData.error?.message)
+      }
+    } else {
+      console.warn('[instagram-oauth] STEP D: No Instagram Business Account on this page:', pageInfo.error?.message || 'not found')
+      // Continue anyway - we'll still save the page token
     }
 
-    const pageId = pageWithIg.id
-    const pageName = pageWithIg.name
-    const igAccount = pageWithIg.instagram_business_account
-    const igUserId = igAccount.id
-    const igUsername = igAccount.username || pageName
-    const igProfilePic = igAccount.profile_picture_url || ''
-
-    console.log('[instagram-oauth] Found Instagram Business Account:', { igUserId, igUsername, pageId })
-
-    // Step 4: Get a Page Access Token (this is what we need for Instagram Graph API)
-    console.log('[instagram-oauth] Getting Page Access Token...')
-    const pageAccessToken = await getPageAccessToken(pageId, longLivedUserToken)
-    console.log('[instagram-oauth] Got Page Access Token')
-    
-    // Also get a long-lived page token (60 days)
-    let longLivedPageToken = pageAccessToken
-    try {
-      const { getLongLivedPageToken } = await import('@/lib/instagram-api')
-      longLivedPageToken = await getLongLivedPageToken(pageAccessToken)
-      console.log('[instagram-oauth] Got long-lived Page Access Token')
-    } catch (e) {
-      console.warn('[instagram-oauth] Could not get long-lived page token, using short-lived:', e)
-    }
-
-    // Step 5: Save user in database
+    // ============================================================
+    // STEP F: Save everything to MongoDB
+    // ============================================================
+    console.log('[instagram-oauth] STEP F: Saving user to database...')
     await connectDB()
 
-    const existingUser = await User.findOne({ instagramUserId: igUserId })
+    const encryptedUserToken = encryptToken(longLivedUserToken)
+    const encryptedPageToken = encryptToken(pageAccessToken)
+
+    // Check if user already exists by instagramUserId or pageId
+    let existingUser = null
+    if (instagramAccountId) {
+      existingUser = await User.findOne({ instagramAccountId })
+    }
+    if (!existingUser) {
+      existingUser = await User.findOne({ instagramPageId: pageId })
+    }
 
     let userId: string
 
     if (existingUser) {
-      const encryptedUserToken = encryptToken(longLivedUserToken)
-      const encryptedPageToken = encryptToken(longLivedPageToken)
       existingUser.instagramAccessToken = encryptedUserToken
       existingUser.pageAccessToken = encryptedPageToken
       existingUser.instagramAccessTokenEncrypted = true
-      existingUser.username = igUsername
-      existingUser.profilePictureUrl = igProfilePic || existingUser.profilePictureUrl
       existingUser.instagramConnected = true
       existingUser.instagramPageId = pageId
-      existingUser.instagramAccountId = igUserId
+      existingUser.instagramAccountId = instagramAccountId || existingUser.instagramAccountId
+      existingUser.instagramUserId = instagramAccountId || existingUser.instagramUserId
+      existingUser.username = instagramUsername || existingUser.username
+      existingUser.instagramHandle = instagramUsername || existingUser.instagramHandle
+      existingUser.profilePictureUrl = profilePictureUrl || existingUser.profilePictureUrl
       existingUser.tokenExpiresAt = new Date(Date.now() + expiresIn * 1000)
       await existingUser.save()
       userId = existingUser._id.toString()
       console.log('[instagram-oauth] Updated existing user:', userId)
     } else {
-      const encryptedUserToken = encryptToken(longLivedUserToken)
-      const encryptedPageToken = encryptToken(longLivedPageToken)
-      const placeholderEmail = 'ig_' + igUserId + '@placeholder.local'
+      const placeholderEmail = 'ig_' + (instagramAccountId || pageId) + '@placeholder.local'
       const newUser = await User.create({
         email: placeholderEmail,
-        name: igUsername,
-        instagramUserId: igUserId,
-        username: igUsername,
-        profilePictureUrl: igProfilePic,
-        instagramHandle: igUsername,
+        name: instagramUsername || pageName,
+        instagramUserId: instagramAccountId || pageId,
+        username: instagramUsername || pageName,
+        profilePictureUrl,
+        instagramHandle: instagramUsername || pageName,
         instagramConnected: true,
         instagramAccessToken: encryptedUserToken,
         pageAccessToken: encryptedPageToken,
         instagramAccessTokenEncrypted: true,
         instagramPageId: pageId,
-        instagramAccountId: igUserId,
+        instagramAccountId: instagramAccountId || '',
         tokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
       })
       userId = newUser._id.toString()
       console.log('[instagram-oauth] Created new user:', userId)
     }
 
-    // Step 6: Create JWT session token and set cookie
+    // Create JWT session token and set cookie
     const sessionToken = signToken({
       userId,
-      name: igUsername,
-      instagramUserId: igUserId,
+      name: instagramUsername || pageName,
+      instagramUserId: instagramAccountId || pageId,
     })
 
     const cookieHeader = createSessionCookie(sessionToken)
 
-    // Step 7: Redirect to dashboard
+    // Redirect to dashboard
     const redirectUrl = new URL('/dashboard', request.url)
     const response = NextResponse.redirect(redirectUrl)
     response.headers.set('Set-Cookie', cookieHeader)
 
-    console.log('[instagram-oauth] Login successful, redirecting to dashboard')
+    console.log('[instagram-oauth] Login successful! Redirecting to dashboard')
+    console.log('[instagram-oauth] Summary:', {
+      hasPageToken: true,
+      hasInstagramAccount: !!instagramAccountId,
+      pageId,
+      instagramAccountId,
+      username: instagramUsername,
+    })
+
     return response
   } catch (err) {
-    console.error('[instagram-oauth] Callback error:', err)
+    console.error('[instagram-oauth] Fatal error:', err)
     const errorMessage = err instanceof Error ? err.message : 'Unknown error'
     const loginUrl = new URL('/auth/login', request.url)
     loginUrl.searchParams.set('error', 'oauth_failed')
