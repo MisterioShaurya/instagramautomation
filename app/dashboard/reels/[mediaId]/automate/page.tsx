@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useSession } from '@/lib/session'
 import { Sidebar } from '@/components/dashboard/sidebar'
-import { ArrowLeft, Loader2, Film, Plus, Trash2, ToggleLeft, MessageSquare, Hash } from 'lucide-react'
+import { ArrowLeft, Loader2, Film, Plus, Trash2, ToggleLeft, MessageSquare, Hash, MessageCircle, RefreshCw, CheckCircle2, Clock, XCircle } from 'lucide-react'
 
 interface ReelDetail {
   id: string
@@ -26,8 +26,18 @@ interface AutomationRule {
   keyword: string
   matchType: 'exact' | 'contains'
   dmMessage: string
+  commentReplyMessage?: string
   active: boolean
   createdAt: string
+}
+
+interface Comment {
+  id: string
+  text: string
+  timestamp: string
+  username: string
+  commenterId: string
+  replied: boolean
 }
 
 export default function AutomateReelPage() {
@@ -43,6 +53,7 @@ export default function AutomateReelPage() {
   const [keyword, setKeyword] = useState('')
   const [matchType, setMatchType] = useState<'exact' | 'contains'>('contains')
   const [dmMessage, setDmMessage] = useState('')
+  const [commentReplyMessage, setCommentReplyMessage] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -52,6 +63,12 @@ export default function AutomateReelPage() {
   const [rulesLoading, setRulesLoading] = useState(true)
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  // Comments state
+  const [comments, setComments] = useState<Comment[]>([])
+  const [commentsLoading, setCommentsLoading] = useState(false)
+  const [totalComments, setTotalComments] = useState(0)
+  const [repliedCount, setRepliedCount] = useState(0)
 
   useEffect(() => {
     if (status === 'unauthenticated') {
@@ -93,11 +110,29 @@ export default function AutomateReelPage() {
     }
   }, [mediaId])
 
+  const fetchComments = useCallback(async () => {
+    setCommentsLoading(true)
+    try {
+      const res = await fetch(`/api/instagram/comments?mediaId=${encodeURIComponent(mediaId)}`)
+      if (res.ok) {
+        const data = await res.json()
+        setComments(data.comments || [])
+        setTotalComments(data.total || 0)
+        setRepliedCount(data.repliedCount || 0)
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setCommentsLoading(false)
+    }
+  }, [mediaId])
+
   useEffect(() => {
     if (status === 'authenticated') {
       fetchRules()
+      fetchComments()
     }
-  }, [status, fetchRules])
+  }, [status, fetchRules, fetchComments])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -108,8 +143,8 @@ export default function AutomateReelPage() {
       setError('Keyword is required')
       return
     }
-    if (!dmMessage.trim()) {
-      setError('DM message is required')
+    if (!dmMessage.trim() && !commentReplyMessage.trim()) {
+      setError('At least a DM message or comment reply message is required')
       return
     }
 
@@ -124,6 +159,7 @@ export default function AutomateReelPage() {
           keyword: keyword.trim(),
           matchType,
           dmMessage: dmMessage.trim(),
+          commentReplyMessage: commentReplyMessage.trim(),
         }),
       })
 
@@ -136,7 +172,9 @@ export default function AutomateReelPage() {
       setKeyword('')
       setMatchType('contains')
       setDmMessage('')
+      setCommentReplyMessage('')
       fetchRules()
+      setTimeout(() => setSuccess(''), 3000)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create rule')
     } finally {
@@ -210,58 +248,136 @@ export default function AutomateReelPage() {
             </Link>
 
             <div className="grid gap-8 lg:grid-cols-[400px_1fr]">
-              {/* Reel preview */}
-              <div>
-                {loading ? (
-                  <div className="flex items-center justify-center rounded-xl border border-border bg-card p-12">
-                    <Loader2 className="h-8 w-8 animate-spin text-accent" />
-                  </div>
-                ) : reel ? (
-                  <div className="overflow-hidden rounded-xl border border-border bg-card">
-                    <div className="aspect-[9/16] w-full overflow-hidden bg-muted">
-                      {reel.thumbnail_url ? (
-                        <img
-                          src={reel.thumbnail_url}
-                          alt={reel.caption || 'Reel thumbnail'}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center">
-                          <Film className="h-16 w-16 text-muted-foreground/50" />
-                        </div>
-                      )}
+              {/* Reel preview + Comments */}
+              <div className="space-y-6">
+                {/* Reel preview */}
+                <div>
+                  {loading ? (
+                    <div className="flex items-center justify-center rounded-xl border border-border bg-card p-12">
+                      <Loader2 className="h-8 w-8 animate-spin text-accent" />
                     </div>
-                    <div className="space-y-2 p-4">
-                      <h2 className="font-semibold">Reel Details</h2>
-                      {reel.caption && (
-                        <p className="text-sm text-muted-foreground">{reel.caption}</p>
-                      )}
-                      <p className="text-xs text-muted-foreground">
-                        Posted{' '}
-                        {new Date(reel.timestamp).toLocaleDateString('en-US', {
-                          year: 'numeric',
-                          month: 'long',
-                          day: 'numeric',
-                        })}
-                      </p>
-                      {reel.permalink && (
-                        <a
-                          href={reel.permalink}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-accent hover:underline"
+                  ) : reel ? (
+                    <div className="overflow-hidden rounded-xl border border-border bg-card">
+                      <div className="aspect-[9/16] w-full overflow-hidden bg-muted">
+                        {reel.thumbnail_url ? (
+                          <img
+                            src={reel.thumbnail_url}
+                            alt={reel.caption || 'Reel thumbnail'}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center">
+                            <Film className="h-16 w-16 text-muted-foreground/50" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-2 p-4">
+                        <h2 className="font-semibold">Reel Details</h2>
+                        {reel.caption && (
+                          <p className="text-sm text-muted-foreground">{reel.caption}</p>
+                        )}
+                        {!reel.caption && (
+                          <p className="text-sm text-muted-foreground italic">No caption</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          Posted{' '}
+                          {new Date(reel.timestamp).toLocaleDateString('en-US', {
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric',
+                          })}
+                        </p>
+                        {reel.permalink && (
+                          <a
+                            href={reel.permalink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-accent hover:underline"
+                          >
+                            View on Instagram ↗
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-card p-8">
+                      <Film className="h-12 w-12 text-muted-foreground/50" />
+                      <p className="mt-4 text-sm text-muted-foreground">Reel not found</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Comments Section */}
+                <div className="rounded-xl border border-border bg-card p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-foreground flex items-center gap-2">
+                      <MessageCircle className="h-5 w-5" />
+                      Comments
+                    </h3>
+                    <div className="flex items-center gap-3 text-sm">
+                      <span className="text-muted-foreground">
+                        {repliedCount}/{totalComments} replied
+                      </span>
+                      <button
+                        onClick={fetchComments}
+                        disabled={commentsLoading}
+                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <RefreshCw className={`h-3 w-3 ${commentsLoading ? 'animate-spin' : ''}`} />
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+
+                  {commentsLoading ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="h-6 w-6 animate-spin text-accent" />
+                    </div>
+                  ) : comments.length === 0 ? (
+                    <div className="py-8 text-center text-sm text-muted-foreground">
+                      No comments yet on this reel. Comments will appear here once people comment.
+                    </div>
+                  ) : (
+                    <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                      {comments.map((comment) => (
+                        <div
+                          key={comment.id}
+                          className={`rounded-lg border p-3 ${
+                            comment.replied
+                              ? 'border-green-500/30 bg-green-500/5'
+                              : 'border-border bg-background'
+                          }`}
                         >
-                          View on Instagram ↗
-                        </a>
-                      )}
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-foreground">
+                              {comment.username}
+                            </span>
+                            {comment.replied ? (
+                              <span className="inline-flex items-center gap-1 text-xs text-green-400">
+                                <CheckCircle2 className="h-3 w-3" />
+                                Replied
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-xs text-yellow-400">
+                                <Clock className="h-3 w-3" />
+                                Pending
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-sm text-muted-foreground">{comment.text}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {new Date(comment.timestamp).toLocaleDateString('en-US', {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-card p-8">
-                    <Film className="h-12 w-12 text-muted-foreground/50" />
-                    <p className="mt-4 text-sm text-muted-foreground">Reel not found</p>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
               {/* Automation Setup */}
@@ -298,19 +414,40 @@ export default function AutomateReelPage() {
                       </div>
                     </div>
 
-                    {/* DM Message */}
+                    {/* Comment Reply Message (public) */}
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-foreground">
+                        <MessageCircle className="mr-1 inline-block h-4 w-4" />
+                        Public Comment Reply <span className="text-muted-foreground font-normal">(optional)</span>
+                      </label>
+                      <textarea
+                        value={commentReplyMessage}
+                        onChange={(e) => setCommentReplyMessage(e.target.value)}
+                        placeholder="Public reply to the comment on Instagram..."
+                        rows={3}
+                        className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                      />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        This will be posted as a public reply to the comment on Instagram.
+                      </p>
+                    </div>
+
+                    {/* DM Message (private) */}
                     <div>
                       <label className="mb-1.5 block text-sm font-medium text-foreground">
                         <MessageSquare className="mr-1 inline-block h-4 w-4" />
-                        DM Message
+                        DM Message <span className="text-muted-foreground font-normal">(sent privately)</span>
                       </label>
                       <textarea
                         value={dmMessage}
                         onChange={(e) => setDmMessage(e.target.value)}
-                        placeholder="The message to send when a comment matches..."
-                        rows={4}
+                        placeholder="Private DM to send to the commenter..."
+                        rows={3}
                         className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                       />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        This will be sent as a private DM to the commenter.
+                      </p>
                     </div>
 
                     {error && (
@@ -366,7 +503,7 @@ export default function AutomateReelPage() {
                           className="flex items-start justify-between rounded-lg border border-border bg-background p-3"
                         >
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
                                 {rule.matchType === 'exact' ? 'Exact' : 'Contains'}
                               </span>
@@ -383,14 +520,21 @@ export default function AutomateReelPage() {
                                 {rule.active ? 'Active' : 'Inactive'}
                               </span>
                             </div>
-                            <p className="mt-1 truncate text-sm text-muted-foreground">
-                              {rule.dmMessage}
-                            </p>
+                            {rule.dmMessage && (
+                              <p className="mt-1 truncate text-sm text-muted-foreground">
+                                <span className="text-xs font-medium text-blue-400">DM:</span> {rule.dmMessage}
+                              </p>
+                            )}
+                            {rule.commentReplyMessage && (
+                              <p className="truncate text-sm text-muted-foreground">
+                                <span className="text-xs font-medium text-green-400">Reply:</span> {rule.commentReplyMessage}
+                              </p>
+                            )}
                             <p className="mt-1 text-xs text-muted-foreground">
                               Created {new Date(rule.createdAt).toLocaleDateString()}
                             </p>
                           </div>
-                          <div className="ml-3 flex gap-1">
+                          <div className="ml-3 flex gap-1 shrink-0">
                             <button
                               onClick={() => handleToggle(rule)}
                               disabled={togglingId === rule._id}

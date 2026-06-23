@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/session-server'
-import Automation from '@/models/Automation'
-import ActivityLog from '@/models/ActivityLog'
+import AutomationRule from '@/models/AutomationRule'
+import SentReply from '@/models/SentReply'
 import { connectDB } from '@/lib/mongodb'
 
 export async function GET(request: NextRequest) {
@@ -14,45 +14,63 @@ export async function GET(request: NextRequest) {
 
     const userId = session.userId
 
-    // Get automation stats
-    const totalAutomations = await Automation.countDocuments({ userId })
-    const activeAutomations = await Automation.countDocuments({
+    // Get real automation rule stats
+    const totalRules = await AutomationRule.countDocuments({ userId })
+    const activeRules = await AutomationRule.countDocuments({
       userId,
-      enabled: true,
+      active: true,
     })
 
-    // Get activity stats
-    const recentActivity = await ActivityLog.find({ userId })
-      .sort({ createdAt: -1 })
+    // Get total reels/media with rules
+    const reelsWithRules = await AutomationRule.distinct('mediaId', { userId })
+
+    // Get real SentReply stats for this user's rules
+    const userRules = await AutomationRule.find({ userId }).select('_id').lean()
+    const userRuleIds = userRules.map(r => r._id)
+
+    const totalDMsSent = await SentReply.countDocuments({
+      ruleId: { $in: userRuleIds },
+    })
+
+    // Count replies by type
+    const commentReplies = await SentReply.countDocuments({
+      ruleId: { $in: userRuleIds },
+      replyType: { $in: ['comment', 'both'] },
+    })
+
+    const dmReplies = await SentReply.countDocuments({
+      ruleId: { $in: userRuleIds },
+      replyType: { $in: ['dm', 'both'] },
+    })
+
+    // Get recent activity (last 20 sent replies)
+    const recentActivity = await SentReply.find({
+      ruleId: { $in: userRuleIds },
+    })
+      .sort({ sentAt: -1 })
       .limit(10)
+      .populate('ruleId', 'keyword mediaId')
+      .lean()
 
-    const totalTriggers = await ActivityLog.countDocuments({
-      userId,
-      type: 'trigger',
-    })
-
-    const totalResponses = await ActivityLog.countDocuments({
-      userId,
+    // Format recent activity for the front-end
+    const formattedActivity = recentActivity.map((item: any) => ({
+      id: item._id,
       type: 'response',
-    })
-
-    // Calculate total engagement from automations
-    const automationStats = await Automation.find({ userId }).select('stats')
-    const totalEngagement = automationStats.reduce(
-      (sum, auto) => sum + (auto.stats?.engagementRate || 0),
-      0
-    )
+      description: `Replied to comment "${item.commentId?.substring(0, 20)}..." via rule: ${item.ruleId?.keyword || 'unknown'}`,
+      createdAt: item.sentAt,
+      replyType: item.replyType,
+    }))
 
     return NextResponse.json({
-      totalAutomations,
-      activeAutomations,
-      totalTriggers,
-      totalResponses,
-      engagementRate:
-        totalAutomations > 0
-          ? Math.round(totalEngagement / totalAutomations)
-          : 0,
-      recentActivity,
+      totalAutomations: totalRules,
+      activeAutomations: activeRules,
+      totalTriggers: commentReplies,
+      totalResponses: dmReplies,
+      engagementRate: totalRules > 0 ? Math.round((commentReplies / totalRules) * 100) : 0,
+      totalReelsWithRules: reelsWithRules.length,
+      totalCommentsReplied: commentReplies,
+      totalDMsSent,
+      recentActivity: formattedActivity,
     })
   } catch (error) {
     console.error('GET /api/dashboard/stats error:', error)

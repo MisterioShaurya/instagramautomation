@@ -4,15 +4,11 @@ import { connectDB } from '@/lib/mongodb'
 import AutomationRule from '@/models/AutomationRule'
 import User from '@/models/User'
 import SentReply from '@/models/SentReply'
-import { sendInstagramPrivateReply } from '@/lib/instagram-api'
+import { sendInstagramPrivateReply, replyToComment } from '@/lib/instagram-api'
 
 // ──────────────────────────────────────────────
 // 1. GET — Meta Webhook Verification Handshake
 // ──────────────────────────────────────────────
-// Meta sends: GET /api/webhooks/instagram?
-//   hub.mode=subscribe&hub.verify_token=<token>&hub.challenge=<challenge>
-//
-// We must respond with the challenge as plain text if verify_token matches.
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
@@ -39,7 +35,6 @@ export async function GET(request: NextRequest) {
     }
 
     console.log('[webhook] Verification successful, returning challenge')
-    // Meta expects the challenge as plain text, not JSON
     return new NextResponse(challenge, {
       status: 200,
       headers: { 'Content-Type': 'text/plain' },
@@ -53,16 +48,12 @@ export async function GET(request: NextRequest) {
 // ──────────────────────────────────────────────
 // 2. POST — Receive Instagram Webhook Events
 // ──────────────────────────────────────────────
-// Meta posts JSON bodies with X-Hub-Signature-256 for verification.
-// We process comment events by matching against AutomationRules and
-// sending private replies via the Graph API.
 export async function POST(request: NextRequest) {
   try {
     // ── Verify X-Hub-Signature-256 ──────────
     const signature = request.headers.get('x-hub-signature-256')
     if (!signature) {
       console.warn('[webhook] Missing X-Hub-Signature-256 header')
-      // Still return 200 so Meta doesn't retry; log as warning
       return NextResponse.json({ ok: true })
     }
 
@@ -79,7 +70,6 @@ export async function POST(request: NextRequest) {
       .digest('hex')
     const expectedSignature = `sha256=${hash}`
 
-    // Use timing-safe comparison
     const sigBuf = Buffer.from(signature)
     const expBuf = Buffer.from(expectedSignature)
     if (
@@ -103,7 +93,6 @@ export async function POST(request: NextRequest) {
     for (const entry of payload.entry || []) {
       for (const change of entry.changes || []) {
         if (change.field === 'comments') {
-          // We don't await — process in background so Meta gets a fast 200
           processCommentEvent(change.value).catch((err) =>
             console.error('[webhook] Background comment processing error:', err)
           )
@@ -111,7 +100,6 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Always return 200 OK immediately to Meta
     return NextResponse.json({ ok: true })
   } catch (error) {
     console.error('[webhook] POST error:', error)
@@ -123,15 +111,14 @@ export async function POST(request: NextRequest) {
 // 3. Comment Event Processing
 // ──────────────────────────────────────────────
 interface CommentEvent {
-  id: string                // Instagram comment ID
-  text: string              // Comment body
+  id: string
+  text: string
   from?: { id: string; username?: string }
-  media?: { id: string }    // The reel/post that was commented on
-  post_id?: string          // Alternative field for media ID (format: "mediaId_pageId")
+  media?: { id: string }
+  post_id?: string
 }
 
 async function processCommentEvent(eventData: CommentEvent) {
-  // Ensure MongoDB connection is established before any model operations
   await connectDB()
 
   const commentId = eventData.id
@@ -150,7 +137,7 @@ async function processCommentEvent(eventData: CommentEvent) {
     return
   }
 
-  console.log('[webhook] Processing comment', { commentId, mediaId, commenterId })
+  console.log('[webhook] Processing comment', { commentId, mediaId, commenterId, text: commentText })
 
   // ── Look up active AutomationRules for this media ──
   const rules = await AutomationRule.find({
@@ -174,7 +161,6 @@ async function processCommentEvent(eventData: CommentEvent) {
     if (rule.matchType === 'exact') {
       matched = commentLower === keyword
     } else {
-      // Default: 'contains'
       matched = commentLower.includes(keyword)
     }
 
@@ -194,9 +180,8 @@ async function processCommentEvent(eventData: CommentEvent) {
     }
 
     // ── Find the media owner's access token ─────
-    // The AutomationRule has a userId; look up that user's Instagram token
     const mediaOwner = await User.findById(rule.userId)
-      .select('instagramAccessToken instagramAccessTokenEncrypted')
+      .select('instagramAccessToken')
       .lean()
 
     if (!mediaOwner?.instagramAccessToken) {
@@ -204,52 +189,65 @@ async function processCommentEvent(eventData: CommentEvent) {
       continue
     }
 
-    // ── Build the DM message (append disclosure note) ──
     const dmMessage = rule.dmMessage || ''
+    const commentReplyMessage = rule.commentReplyMessage || ''
 
-    // Log that an automated message is being sent (for future compliance disclosure)
-    console.log(
-      '[webhook][compliance] Sending automated private reply — consider adding "you are talking to a bot" disclosure to dmMessage',
-      {
-        ruleId: rule._id,
-        commentId,
-        commenterId,
-        mediaId,
-        dmMessagePreview: dmMessage.substring(0, 80),
+    // ── Step 1: Reply publicly to the comment (if commentReplyMessage is set) ──
+    let commentReplySuccess = false
+    if (commentReplyMessage) {
+      try {
+        console.log('[webhook] Replying publicly to comment:', commentId)
+        await replyToComment(commentId, commentReplyMessage, mediaOwner.instagramAccessToken)
+        console.log('[webhook] Public reply sent successfully for comment:', commentId)
+        commentReplySuccess = true
+      } catch (error: any) {
+        console.error('[webhook] Failed to reply publicly to comment', {
+          ruleId: rule._id,
+          commentId,
+          error: error.message,
+          statusCode: error.statusCode,
+        })
+        // Continue to DM even if public reply fails
       }
-    )
+    }
 
-    // ── Send the private reply via Graph API ────
-    try {
-      const result = await sendInstagramPrivateReply(
-        commentId,
-        dmMessage,
-        mediaOwner.instagramAccessToken
-      )
+    // ── Step 2: Send private reply (DM) ────
+    let dmSuccess = false
+    if (dmMessage) {
+      try {
+        const result = await sendInstagramPrivateReply(
+          commentId,
+          dmMessage,
+          mediaOwner.instagramAccessToken
+        )
+        console.log('[webhook] Private reply (DM) sent successfully', {
+          ruleId: rule._id,
+          commentId,
+          result,
+        })
+        dmSuccess = true
+      } catch (error: any) {
+        console.error('[webhook] Failed to send private reply (DM)', {
+          ruleId: rule._id,
+          commentId,
+          error: error.message,
+          statusCode: error.statusCode,
+        })
+      }
+    }
 
-      console.log('[webhook] Private reply sent successfully', {
-        ruleId: rule._id,
-        commentId,
-        result,
-      })
-
-      // ── Log in SentReplies ──────────────────────
+    // ── Mark as processed even if one action succeeded ──
+    if (commentReplySuccess || dmSuccess) {
       await SentReply.create({
         ruleId: rule._id,
         commentId,
         commenterId,
         sentAt: new Date(),
+        replyType: commentReplySuccess && dmSuccess ? 'both' : commentReplySuccess ? 'comment' : 'dm',
       })
-
       console.log('[webhook] Logged sent reply to SentReplies for dedup')
-    } catch (error: any) {
-      console.error('[webhook] Failed to send private reply', {
-        ruleId: rule._id,
-        commentId,
-        error: error.message,
-        statusCode: error.statusCode,
-      })
-      // Don't throw — continue to other rules
+    } else {
+      console.warn('[webhook] Both public reply and DM failed — not logging in SentReplies')
     }
   }
 }

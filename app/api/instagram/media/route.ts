@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/session-server'
+import { connectDB } from '@/lib/mongodb'
 import User from '@/models/User'
 import { decryptToken } from '@/lib/encryption'
 
@@ -18,7 +19,10 @@ export async function GET(_request: NextRequest) {
       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
     }
 
-    // 2. Fetch user from DB to get the encrypted access token and instagramUserId
+    // 2. Ensure DB connection
+    await connectDB()
+
+    // 3. Fetch user from DB to get the encrypted access token and instagramUserId
     const user = await User.findById(session.userId)
     if (!user) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 })

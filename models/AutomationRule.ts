@@ -36,6 +36,11 @@ const automationRuleSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    commentReplyMessage: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     active: {
       type: Boolean,
       default: true,

@@ -243,6 +243,96 @@ export async function sendInstagramPrivateReply(
 }
 
 /**
+ * Reply to an Instagram comment publicly via the Graph API.
+ * POST https://graph.instagram.com/v21.0/{ig-comment-id}/replies
+ *
+ * This replies publicly to the comment on the reel/post.
+ */
+export async function replyToComment(
+  commentId: string,
+  messageText: string,
+  accessToken: string
+): Promise<{ id: string }> {
+  try {
+    console.log('[instagram] Replying to comment:', commentId)
+
+    if (!accessToken) {
+      throw new InstagramDMError(401, null, 'Instagram access token not found')
+    }
+
+    const decryptedToken = decryptToken(accessToken)
+    if (!decryptedToken) {
+      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
+    }
+
+    const truncatedMessage = messageText.substring(0, 1000)
+
+    // Meta Graph API requires access_token as query param
+    const url = `https://graph.instagram.com/v21.0/${commentId}/replies?access_token=${encodeURIComponent(decryptedToken)}`
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: truncatedMessage,
+      }),
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      const errorMessage = data.error?.message || 'Unknown error'
+      const fullError = data.error ? JSON.stringify(data.error) : errorMessage
+      console.error('[instagram] Reply to comment API error:', fullError)
+      throw new InstagramDMError(response.status, data.error?.code, errorMessage)
+    }
+
+    console.log('[instagram] Reply to comment sent successfully:', JSON.stringify(data))
+    return data
+  } catch (error) {
+    if (error instanceof InstagramDMError) throw error
+    console.error('[instagram] Unexpected error replying to comment:', error)
+    throw new InstagramDMError(500, null, `Unexpected error: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * Fetch comments for a specific media (reel/post) from Instagram.
+ * GET https://graph.instagram.com/v21.0/{mediaId}/comments
+ */
+export async function fetchMediaComments(
+  mediaId: string,
+  accessToken: string
+): Promise<any[]> {
+  try {
+    console.log('[instagram] Fetching comments for media:', mediaId)
+
+    const decryptedToken = decryptToken(accessToken)
+    if (!decryptedToken) {
+      throw new InstagramDMError(401, null, 'Failed to decrypt access token')
+    }
+
+    const url = `https://graph.instagram.com/v21.0/${mediaId}/comments?access_token=${encodeURIComponent(decryptedToken)}&fields=id,text,timestamp,username,from{id,username}`
+    const response = await fetch(url)
+    const data = await response.json()
+
+    if (!response.ok) {
+      const errorMessage = data.error?.message || 'Unknown error'
+      console.error('[instagram] Fetch comments API error:', errorMessage)
+      throw new InstagramDMError(response.status, data.error?.code, errorMessage)
+    }
+
+    console.log(`[instagram] Fetched ${data.data?.length || 0} comments for media ${mediaId}`)
+    return data.data || []
+  } catch (error) {
+    if (error instanceof InstagramDMError) throw error
+    console.error('[instagram] Unexpected error fetching comments:', error)
+    throw new InstagramDMError(500, null, `Unexpected error: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
  * Send a DM with a link
  * Instagram allows including URLs, they'll be shortened in the UI
  */

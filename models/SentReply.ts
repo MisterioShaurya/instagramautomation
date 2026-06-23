@@ -21,6 +21,11 @@ const sentReplySchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    replyType: {
+      type: String,
+      enum: ['comment', 'dm', 'both'],
+      default: 'dm',
+    },
     sentAt: {
       type: Date,
       default: Date.now,
